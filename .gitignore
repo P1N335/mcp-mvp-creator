@@ -1,0 +1,15 @@
+node_modules/
+build/
+data/
+.claude/settings.local.json
+
+.env
+.env.*
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+coverage/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,24 @@
+{
+  "name": "mvp-control-panel-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "build/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "dev:ui": "tsx src/ui.ts",
+    "dev:runner": "tsx src/runner.ts",
+    "build": "tsc",
+    "start": "node build/index.js",
+    "ui": "node build/ui.js",
+    "runner": "node build/runner.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
