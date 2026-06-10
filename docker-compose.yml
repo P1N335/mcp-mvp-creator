@@ -1,0 +1,64 @@
+# MVP Control Panel — два режима, переключаются через .env (compose читает его сам).
+#
+#  DEMO (по умолчанию): без секретов, без токенов.
+#    mkdir -p data mvp-projects
+#    docker compose up -d --build
+#
+#  LIVE (боевой, субагенты реально собирают MVP и тратят токены):
+#    cp .env.example .env   # выставить MVP_DEMO_MODE=0 и ANTHROPIC_API_KEY
+#    docker compose up -d --build
+#
+# UI: http://127.0.0.1:4173   ·  результат в ./mvp-projects
+
+services:
+  control-panel:
+    build:
+      context: .
+      target: runtime
+    image: mvp-control-panel:local
+    container_name: mvp-control-panel
+    environment:
+      PORT: "4173"
+      MVP_CONTROL_PANEL_DB: /app/data/mvp-control-panel.sqlite
+      MVP_PROJECTS_DIR: /app/mvp-projects
+      # DEMO=1 по умолчанию; для LIVE задай MVP_DEMO_MODE=0 в .env
+      MVP_DEMO_MODE: "${MVP_DEMO_MODE:-1}"
+      # Нужен только для LIVE-режима; в DEMO игнорируется
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      CLAUDE_PERMISSION_MODE: "${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+    ports:
+      - "4173:4173"
+    volumes:
+      - ./data:/app/data
+      - ./mvp-projects:/app/mvp-projects
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4173/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # MCP-сервер (stdio) для сессии Claude Code на хосте (модель A).
+  # Делит ту же БД через bind-mount:  docker compose run --rm -T mcp
+  mcp:
+    image: mvp-control-panel:local
+    build:
+      context: .
+      target: runtime
+    profiles:
+      - mcp
+    environment:
+      MVP_CONTROL_PANEL_DB: /app/data/mvp-control-panel.sqlite
+      MVP_PROJECTS_DIR: /app/mvp-projects
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    volumes:
+      - ./data:/app/data
+      - ./mvp-projects:/app/mvp-projects
+    stdin_open: true
+    tty: false
+    command: ["node", "build/index.js"]

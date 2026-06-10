@@ -307,9 +307,9 @@ export const defaultRoleProviders: Record<SubagentRole, AgentProvider> = {
   frontend: "claude",
   backend: "claude",
   ai: "claude",
-  qa: "codex",
-  devops: "codex",
-  docs: "codex",
+  qa: "claude",
+  devops: "claude",
+  docs: "claude",
 };
 
 export function providerForRole(role: SubagentRole): AgentProvider {

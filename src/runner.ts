@@ -8,18 +8,22 @@ import {
   buildSubagentDefinition,
   claimTask,
   completeTask,
+  ensureProjectWorkspace,
   failTask,
   getProjectOrError,
   listProjects,
   listReadyTasks,
-  listRecentRunsForTask,
-  ensureProjectWorkspace,
-  providerForRole,
-  type AgentProvider,
   type SubagentRole,
 } from "./store.js";
 
-type RunnerProvider = AgentProvider | "auto";
+// Лёгкий Claude-only runner.
+//
+// В нативной модели субагентов (Вариант A) оркестрацию обычно ведёт сама сессия
+// Claude Code. Этот runner оставлен как опциональный механизм, чтобы кнопка
+// «Сгенерировать MVP» в локальном UI могла запустить субагента в headless-режиме.
+// Codex-провайдер и кросс-провайдерный fallback убраны: остаётся claude или manual.
+
+type RunnerProvider = "claude" | "manual";
 
 type RunnerOptions = {
   projectId?: string;
@@ -52,11 +56,15 @@ const subagentRoles = new Set<SubagentRole>([
   "docs",
 ]);
 
-const providers = new Set<RunnerProvider>(["auto", "codex", "claude", "manual"]);
+// Принимаем любые значения --provider для обратной совместимости со старым UI,
+// но всё, что не "manual", трактуем как "claude".
+function normalizeProvider(value: string | undefined): RunnerProvider {
+  return value === "manual" ? "manual" : "claude";
+}
 
 function parseArgs(argv: string[]): RunnerOptions {
   const options: RunnerOptions = {
-    provider: "auto",
+    provider: "claude",
     once: false,
     dryRun: false,
     intervalMs: 5000,
@@ -84,10 +92,7 @@ function parseArgs(argv: string[]): RunnerOptions {
     }
 
     if (arg === "--provider") {
-      if (!providers.has(next as RunnerProvider)) {
-        throw new Error(`Unsupported provider: ${next}`);
-      }
-      options.provider = next as RunnerProvider;
+      options.provider = normalizeProvider(next);
       index += 1;
       continue;
     }
@@ -144,24 +149,24 @@ function parseArgs(argv: string[]): RunnerOptions {
 
 function printHelp() {
   console.log(`
-MVP Control Panel Runner
+MVP Control Panel Runner (Claude-only)
 
 Usage:
-  node build/runner.js --project-id <id> --provider auto --once
-  node build/runner.js --project-id <id> --provider codex --once
-  node build/runner.js --project-id <id> --provider claude --role frontend --max-parallel 2
+  node build/runner.js --project-id <id> --once
+  node build/runner.js --project-id <id> --role frontend --max-parallel 2
+  node build/runner.js --project-id <id> --stop-when-idle --max-cycles 8
 
 Options:
   --project-id <id>      Project to run. Defaults to all projects.
   --role <role>          Restrict to one subagent role.
-  --provider <provider>  auto, manual, codex, or claude. Defaults to auto.
+  --provider <provider>  claude (default) or manual. Other values map to claude.
   --agent-label <label>  Label stored in agent profile/run metadata.
-  --once                Run one polling cycle and exit.
-  --dry-run             Claim nothing; only print ready tasks.
-  --interval-ms <ms>    Poll interval for loop mode. Defaults to 5000.
-  --max-parallel <n>    Maximum tasks to launch per cycle. Defaults to 1.
-  --max-cycles <n>      Stop loop mode after this many polling cycles.
-  --stop-when-idle      Stop loop mode when no ready tasks remain.
+  --once                 Run one polling cycle and exit.
+  --dry-run              Claim nothing; only print ready tasks.
+  --interval-ms <ms>     Poll interval for loop mode. Defaults to 5000.
+  --max-parallel <n>     Maximum tasks to launch per cycle. Defaults to 1.
+  --max-cycles <n>       Stop loop mode after this many polling cycles.
+  --stop-when-idle       Stop loop mode when no ready tasks remain.
   `.trim());
 }
 
@@ -260,94 +265,6 @@ function roleForReadyTask(
   return "docs";
 }
 
-type ProviderDecision = {
-  provider: AgentProvider;
-  fallbackFrom?: AgentProvider;
-  reason?: string;
-};
-
-function alternateProvider(provider: AgentProvider): AgentProvider {
-  if (provider === "codex") return "claude";
-  if (provider === "claude") return "codex";
-  return "codex";
-}
-
-function textLooksResourceLimited(text: string) {
-  const normalized = text.toLowerCase();
-  const patterns = [
-    "token limit",
-    "tokens exceeded",
-    "too many tokens",
-    "exceeded token",
-    "maximum context",
-    "context length",
-    "context window",
-    "context limit",
-    "input is too large",
-    "session limit",
-    "usage limit",
-    "rate limit",
-    "quota exceeded",
-    "resets ",
-  ];
-
-  return patterns.some((pattern) => normalized.includes(pattern));
-}
-
-function resolveProviderDecision(
-  readyTask: ReturnType<typeof listReadyTasks>[number],
-  options: RunnerOptions,
-): ProviderDecision {
-  if (options.provider !== "auto") return { provider: options.provider };
-
-  const role = roleForReadyTask(readyTask, options);
-  const preferredProvider = providerForRole(role);
-  const limitedRun = listRecentRunsForTask(readyTask.task.id, 8).find(
-    (run) =>
-      run.status === "failed" &&
-      run.provider !== "manual" &&
-      Boolean(run.error && textLooksResourceLimited(run.error)),
-  );
-
-  if (!limitedRun) return { provider: preferredProvider };
-
-  return {
-    provider: alternateProvider(limitedRun.provider),
-    fallbackFrom: limitedRun.provider,
-    reason: "resource-limit",
-  };
-}
-
-function resolveProvider(
-  readyTask: ReturnType<typeof listReadyTasks>[number],
-  options: RunnerOptions,
-) {
-  return resolveProviderDecision(readyTask, options).provider;
-}
-
-function commandLabelForRole(
-  provider: AgentProvider,
-  role: SubagentRole,
-  workspacePath: string,
-) {
-  const definition = buildSubagentDefinition({
-    role,
-    provider,
-    workspacePath,
-  });
-
-  if (provider === "codex") {
-    return `${process.env.CODEX_CMD ?? "codex"} exec -C ${workspacePath} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
-  }
-
-  if (provider === "claude") {
-    const permissionMode = process.env.CLAUDE_PERMISSION_MODE ?? "bypassPermissions";
-    return `${findClaudeCommand()} --permission-mode ${permissionMode} --add-dir ${workspacePath} --agents <generated> --agent ${definition.agentName} ${process.env.CLAUDE_ARGS ?? "-p -"}`.trim();
-  }
-
-  return "manual";
-}
-
 function claudeArgsForRole(role: SubagentRole, workspacePath: string) {
   const definition = buildSubagentDefinition({ role, provider: "claude" });
   const agentsConfig = buildNativeClaudeAgentsConfig([role]);
@@ -370,34 +287,24 @@ function claudeArgsForRole(role: SubagentRole, workspacePath: string) {
   ];
 }
 
+function commandLabelForRole(role: SubagentRole, workspacePath: string) {
+  const definition = buildSubagentDefinition({ role, provider: "claude", workspacePath });
+  const permissionMode = process.env.CLAUDE_PERMISSION_MODE ?? "bypassPermissions";
+  return `${findClaudeCommand()} --permission-mode ${permissionMode} --add-dir ${workspacePath} --agents <generated> --agent ${definition.agentName} ${process.env.CLAUDE_ARGS ?? "-p -"}`.trim();
+}
+
 async function runAgent(
-  provider: AgentProvider,
+  provider: RunnerProvider,
   role: SubagentRole,
   prompt: string,
   workspacePath: string,
-) {
+): Promise<AgentProcessResult> {
   if (provider === "manual") {
     return {
       exitCode: 0,
       stdout: "Manual runner completed the task without launching an external agent.",
       stderr: "",
     };
-  }
-
-  if (provider === "codex") {
-    return runCommand({
-      command: process.env.CODEX_CMD ?? "codex",
-      args: [
-        "exec",
-        "-C",
-        workspacePath,
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-        "-",
-      ],
-      prompt,
-      cwd: workspacePath,
-    });
   }
 
   return runCommand({
@@ -426,22 +333,17 @@ function agentResultLooksBlocked(result: AgentProcessResult) {
   return blockedPatterns.some((pattern) => output.includes(pattern));
 }
 
-function agentResultLooksResourceLimited(result: AgentProcessResult) {
-  return textLooksResourceLimited(`${result.stdout}\n${result.stderr}`);
-}
-
 async function processReadyTask(
   readyTask: ReturnType<typeof listReadyTasks>[number],
   options: RunnerOptions,
 ) {
   const role = roleForReadyTask(readyTask, options);
-  const providerDecision = resolveProviderDecision(readyTask, options);
-  const provider = providerDecision.provider;
+  const provider = options.provider;
   const project = getProjectOrError(readyTask.task.projectId);
   const workspacePath = ensureProjectWorkspace(project);
   const definition = buildSubagentDefinition({
     role,
-    provider,
+    provider: "claude",
     projectId: project.id,
     workspacePath,
   });
@@ -454,36 +356,26 @@ async function processReadyTask(
       role,
       provider,
       subagent: definition.agentName,
-      nativeKind: definition.nativeKind,
       workspacePath,
-      fallbackFrom: providerDecision.fallbackFrom,
-      reason: providerDecision.reason,
     }),
   );
+
   const claim = claimTask({
     taskId: readyTask.task.id,
     role,
     provider,
     agentLabel: options.agentLabel ?? definition.agentName,
-    command: commandLabelForRole(provider, role, workspacePath),
+    command: commandLabelForRole(role, workspacePath),
   });
 
   appendAgentLog({
     runId: claim.run.id,
-    message: `Runner launched ${definition.agentName} (${definition.nativeKind}, ${provider}) in ${workspacePath} for task "${claim.task.title}".`,
+    message: `Runner launched ${definition.agentName} (claude) in ${workspacePath} for task "${claim.task.title}".`,
   });
-  if (providerDecision.fallbackFrom) {
-    appendAgentLog({
-      runId: claim.run.id,
-      level: "warning",
-      message: `Fallback routing: previous ${providerDecision.fallbackFrom} run hit a resource limit, so this task is now running via ${provider}.`,
-    });
-  }
 
   const result = await runAgent(provider, role, claim.run.prompt, workspacePath);
-  const resourceLimited = agentResultLooksResourceLimited(result);
 
-  if (result.exitCode === 0 && !agentResultLooksBlocked(result) && !resourceLimited) {
+  if (result.exitCode === 0 && !agentResultLooksBlocked(result)) {
     const completion = completeTask({
       runId: claim.run.id,
       summary: `${provider} runner exited successfully.`,
@@ -506,9 +398,7 @@ async function processReadyTask(
   }
 
   const error =
-    resourceLimited
-      ? `Agent resource limit detected for ${provider}; task requeued for fallback provider.`
-      : result.exitCode === 0
+    result.exitCode === 0
       ? "Agent reported a permission/write blocker even though the process exited successfully."
       : result.stderr ||
         result.stdout ||
@@ -525,21 +415,12 @@ async function processReadyTask(
     title: `${provider} runner output`,
     content: [result.stdout, result.stderr].filter(Boolean).join("\n\n"),
   });
-  if (resourceLimited) {
-    appendAgentLog({
-      runId: claim.run.id,
-      level: "warning",
-      message: `Resource limit detected. The next auto-routed run for this task will try ${alternateProvider(provider)}.`,
-    });
-  }
   console.log(
     JSON.stringify({
       event: "failed",
       taskId: failure.task.id,
       runId: claim.run.id,
       exitCode: result.exitCode,
-      resourceLimited,
-      fallbackProvider: resourceLimited ? alternateProvider(provider) : undefined,
     }),
   );
 }
@@ -563,12 +444,10 @@ async function runCycle(options: RunnerOptions) {
         event: "dry-run",
         readyTasks: selected.map((readyTask) => {
           const role = roleForReadyTask(readyTask, options);
-          const providerDecision = resolveProviderDecision(readyTask, options);
-          const provider = providerDecision.provider;
           const project = getProjectOrError(readyTask.task.projectId);
           const definition = buildSubagentDefinition({
             role,
-            provider,
+            provider: "claude",
             projectId: project.id,
             workspacePath: project.workspacePath,
           });
@@ -577,11 +456,9 @@ async function runCycle(options: RunnerOptions) {
             taskId: readyTask.task.id,
             title: readyTask.task.title,
             role,
-            provider,
+            provider: options.provider,
             subagent: definition.agentName,
             workspacePath: project.workspacePath,
-            fallbackFrom: providerDecision.fallbackFrom,
-            reason: providerDecision.reason,
           };
         }),
       }),

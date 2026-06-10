@@ -10,7 +10,11 @@
     "build": "tsc",
     "start": "node build/index.js",
     "ui": "node build/ui.js",
-    "runner": "node build/runner.js"
+    "ui:advanced": "node build/ui.advanced.js",
+    "dev:ui:advanced": "tsx src/ui.advanced.ts",
+    "runner": "node build/runner.js",
+    "gen:agents": "node scripts/generate-agents.mjs",
+    "seed:demo": "node scripts/seed-demo.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

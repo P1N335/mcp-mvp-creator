@@ -1,0 +1,17 @@
+node_modules
+build
+data
+mvp-projects
+.git
+.gitignore
+*.bak
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.claude/settings.local.json
+npm-debug.log*
+Dockerfile
+docker-compose.yml
+README.md

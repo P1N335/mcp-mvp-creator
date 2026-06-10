@@ -13,3 +13,11 @@ data/
 coverage/
 .DS_Store
 Thumbs.db
+
+# editor/agent backups
+*.bak
+
+# Docker bind-mount: сгенерированные MVP
+mvp-projects/
+DEMO.md
+CLAUDE.md
